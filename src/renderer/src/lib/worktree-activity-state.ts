@@ -39,6 +39,22 @@ export function getLiveAgentStatusByWorktreeId(
   const entries = Object.values(agentStatusByPaneKey ?? {}).filter((entry) =>
     isFreshNonDoneAgentStatus(entry, now)
   )
+  return getAgentStatusByWorktreeId(entries, tabsByWorktree)
+}
+
+// Quiet or disconnected hooks do not prove the agent finished using its browser state.
+export function getWorktreeIdsWithUnfinishedAgent(
+  agentStatusByPaneKey: Record<string, AgentStatusEntry>,
+  tabsByWorktree: TabsByWorktree
+): Set<string> {
+  const entries = Object.values(agentStatusByPaneKey).filter((entry) => entry.state !== 'done')
+  return new Set(getAgentStatusByWorktreeId(entries, tabsByWorktree).keys())
+}
+
+function getAgentStatusByWorktreeId(
+  entries: readonly AgentStatusEntry[],
+  tabsByWorktree: TabsByWorktree | null | undefined
+): Map<string, LiveAgentWorktreeStatus> {
   if (entries.length === 0) {
     return new Map()
   }

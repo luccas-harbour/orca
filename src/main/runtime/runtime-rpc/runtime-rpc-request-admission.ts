@@ -4,10 +4,16 @@ import type { RpcMessageContext } from '../rpc/transport'
 import type { RpcRequest, RpcResponse } from '../rpc/core'
 import { errorResponse } from '../rpc/errors'
 import { RuntimeRpcBinaryRouting } from './runtime-rpc-binary-routing'
-import { classifyRuntimeLongPoll, type RuntimeLongPollClass } from './runtime-rpc-long-poll'
+import {
+  BROWSER_WAIT_CAP,
+  classifyRuntimeLongPoll,
+  type RuntimeLongPollClass
+} from './runtime-rpc-long-poll'
 import { OWNER_RPC_CALLER_SCOPE, type RpcCallerScope } from '../rpc/rpc-caller-scope'
 
 export class RuntimeRpcRequestAdmission extends RuntimeRpcBinaryRouting {
+  private activeBrowserWaits = 0
+
   // Why: Unix socket dispatch is one-shot and auths via the shared token from the 0o600 metadata file. See §3.1.
   protected async handleMessage(
     rawMessage: string,
@@ -23,6 +29,14 @@ export class RuntimeRpcRequestAdmission extends RuntimeRpcBinaryRouting {
       return parsed.error
     }
     const { request, callerScope } = parsed
+    const browserWait = request.method === 'browser.wait'
+    if (browserWait && this.activeBrowserWaits >= BROWSER_WAIT_CAP) {
+      return this.buildError(
+        request.id,
+        'runtime_busy',
+        'Browser wait capacity reached; retry with backoff'
+      )
+    }
 
     // Why: long-poll admission fence; short RPCs bypass the counter. See §7 risk #2.
     const longPoll = classifyRuntimeLongPoll(request)
@@ -30,17 +44,22 @@ export class RuntimeRpcRequestAdmission extends RuntimeRpcBinaryRouting {
     if (rejection) {
       return this.buildError(request.id, 'runtime_busy', rejection)
     }
-    if (longPoll) {
-      // Why: arm keepalive only for long-polls; short RPCs never create the setInterval. See §3.1.
-      context?.startKeepalive()
+    if (browserWait) {
+      this.activeBrowserWaits += 1
     }
 
     try {
+      if (longPoll || browserWait) {
+        context?.startKeepalive()
+      }
       return await this.dispatcher.dispatch(request, {
-        signal: longPoll ? context?.signal : undefined,
+        signal: longPoll || browserWait ? context?.signal : undefined,
         callerScope
       })
     } finally {
+      if (browserWait) {
+        this.activeBrowserWaits -= 1
+      }
       this.releaseLongPoll(longPoll)
     }
   }

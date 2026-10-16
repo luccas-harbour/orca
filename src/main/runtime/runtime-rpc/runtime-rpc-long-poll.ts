@@ -6,6 +6,9 @@ export const KEEPALIVE_INTERVAL_MS = 10_000
 // Why: cap long-polls at half the 32-slot connection budget so they can't starve short RPCs; overflow → runtime_busy. See §7 risk #2.
 export const LONG_POLL_CAP = 16
 
+// Twelve browser waits plus sixteen long polls leave four of the 32 local sockets for short calls.
+export const BROWSER_WAIT_CAP = 12
+
 // Why: orchestration.ask blocks on a human/agent reply for minutes, an order of
 // magnitude longer than terminal.wait or check --wait, so a fleet of asking
 // workers would otherwise hold every slot and starve the mobile/web/CLI/relay
