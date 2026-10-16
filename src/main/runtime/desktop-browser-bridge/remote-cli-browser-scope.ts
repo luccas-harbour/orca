@@ -74,65 +74,6 @@ export function resolveRemoteCliBrowserScopeSelector(
   )
 }
 
-export const REMOTE_CLI_EVAL_TIMEOUT_MS = 30_000
-
-/**
- * Inside a bridged command, bounds page work by a deadline and by revocation, and runs `cancel`
- * (for example terminating the page's script) when either fires. Outside one it returns `work`.
- */
-export function boundRemoteCliBrowserWork<T>(
-  work: Promise<T>,
-  cancel: () => void,
-  timeoutMs = REMOTE_CLI_EVAL_TIMEOUT_MS
-): Promise<T> {
-  const active = scope.getStore()
-  if (!active) {
-    return work
-  }
-  let timer: ReturnType<typeof setTimeout> | undefined
-  let onRevoked = (): void => {}
-  const interrupted = new Promise<never>((_resolve, reject) => {
-    const interrupt = (error: BrowserError): void => {
-      cancel()
-      reject(error)
-    }
-    onRevoked = () =>
-      interrupt(
-        new BrowserError(
-          DESKTOP_BROWSER_BRIDGE_UNAVAILABLE_CODE,
-          'The Orca desktop stopped sharing its browser while this command ran.'
-        )
-      )
-    timer = setTimeout(
-      () =>
-        interrupt(
-          new BrowserError(
-            'browser_timeout',
-            `The page script did not finish within ${Math.round(timeoutMs / 1000)}s.`
-          )
-        ),
-      timeoutMs
-    )
-    if (active.revoked?.aborted) {
-      onRevoked()
-    } else {
-      active.revoked?.addEventListener('abort', onRevoked, { once: true })
-    }
-  })
-  // Why: a settled race leaves `interrupted` pending forever; it must not surface as unhandled.
-  interrupted.catch(() => {})
-  return Promise.race([work, interrupted]).finally(() => {
-    clearTimeout(timer)
-    active.revoked?.removeEventListener('abort', onRevoked)
-  })
-}
-
-/** Captures the bridged scope now so `boundRemoteCliBrowserWork` applies when queued work runs. */
-export function captureRemoteCliBrowserWorkBound(): <T>(
-  work: Promise<T>,
-  cancel: () => void
-) => Promise<T> {
-  const active = scope.getStore()
-  return (work, cancel) =>
-    active ? scope.run(active, () => boundRemoteCliBrowserWork(work, cancel)) : work
+export function captureRemoteCliBrowserAbortSignal(): AbortSignal | undefined {
+  return scope.getStore()?.revoked
 }

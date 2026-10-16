@@ -4,7 +4,6 @@ import {
   type DesktopBrowserBridgeRequest
 } from '../../../shared/desktop-browser-bridge-protocol'
 import {
-  boundRemoteCliBrowserWork,
   captureRemoteCliBrowserRevocation,
   resolveRemoteCliBrowserScopeSelector,
   runInRemoteCliBrowserScope
@@ -533,49 +532,6 @@ describe('captureRemoteCliBrowserRevocation', () => {
   it('never blocks a command that did not come from a host', () => {
     const assertNotRevoked = captureRemoteCliBrowserRevocation()
     expect(() => assertNotRevoked()).not.toThrow()
-  })
-})
-
-describe('boundRemoteCliBrowserWork', () => {
-  it('returns page work unchanged outside a bridged command', async () => {
-    const cancel = vi.fn()
-    await expect(boundRemoteCliBrowserWork(Promise.resolve(1), cancel, 5)).resolves.toBe(1)
-    expect(cancel).not.toHaveBeenCalled()
-  })
-
-  it('stops a bridged page script at its deadline and cancels it', async () => {
-    const cancel = vi.fn()
-    const outcome = runInRemoteCliBrowserScope(HOST_WORKSPACE, () =>
-      boundRemoteCliBrowserWork(new Promise(() => {}), cancel, 10)
-    )
-
-    await expect(outcome).rejects.toMatchObject({ code: 'browser_timeout' })
-    expect(cancel).toHaveBeenCalledOnce()
-  })
-
-  it('stops a bridged page script when the bridge detaches', async () => {
-    const revoked = new AbortController()
-    const cancel = vi.fn()
-    const outcome = runInRemoteCliBrowserScope(
-      HOST_WORKSPACE,
-      () => boundRemoteCliBrowserWork(new Promise(() => {}), cancel, 60_000),
-      revoked.signal
-    )
-
-    revoked.abort()
-
-    await expect(outcome).rejects.toMatchObject({ code: 'desktop_browser_bridge_unavailable' })
-    expect(cancel).toHaveBeenCalledOnce()
-  })
-
-  it('lets a bridged script that finishes in time return its result', async () => {
-    const cancel = vi.fn()
-    const outcome = runInRemoteCliBrowserScope(HOST_WORKSPACE, () =>
-      boundRemoteCliBrowserWork(Promise.resolve('done'), cancel, 60_000)
-    )
-
-    await expect(outcome).resolves.toBe('done')
-    expect(cancel).not.toHaveBeenCalled()
   })
 })
 

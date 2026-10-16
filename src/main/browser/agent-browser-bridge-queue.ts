@@ -4,9 +4,11 @@ import { AgentBrowserBridgeShutdown } from './agent-browser-bridge-shutdown'
 import { ORCA_TAB_SESSION_PREFIX } from './agent-browser-orphan-sweep'
 import type {
   EnqueueTargetedCommandOptions,
+  QueuedCommand,
   ResolvedBrowserCommandTarget
 } from './agent-browser-bridge-types'
 import { captureRemoteCliBrowserRevocation } from '../runtime/desktop-browser-bridge/remote-cli-browser-scope'
+import { assertBrowserPageEvaluationAvailable } from './browser-page-evaluation'
 
 export abstract class AgentBrowserBridgeQueue extends AgentBrowserBridgeShutdown {
   // Why: route tab switch through the command queue so it can't race in-flight commands targeting the old tab.
@@ -60,6 +62,7 @@ export abstract class AgentBrowserBridgeQueue extends AgentBrowserBridgeShutdown
     options: EnqueueTargetedCommandOptions = {}
   ): Promise<T> {
     this.assertCommandAdmission()
+    options.signal?.throwIfAborted()
     const assertNotRevoked = captureRemoteCliBrowserRevocation()
     assertNotRevoked()
     const { browserPageId: pageId } = this.resolveCommandTarget(
@@ -75,8 +78,19 @@ export abstract class AgentBrowserBridgeQueue extends AgentBrowserBridgeShutdown
         queue = []
         this.commandQueues.set(sessionName, queue)
       }
-      queue.push({
+      const removeCancellation = (): void => options.signal?.removeEventListener('abort', onAbort)
+      const onAbort = (): void => {
+        const index = queue.indexOf(command)
+        if (index === -1) {
+          return
+        }
+        queue.splice(index, 1)
+        command.reject(options.signal?.reason)
+      }
+      const command: QueuedCommand = {
         execute: () => {
+          removeCancellation()
+          options.signal?.throwIfAborted()
           assertNotRevoked()
           return this.executeQueuedCommand(
             worktreeId,
@@ -88,9 +102,18 @@ export abstract class AgentBrowserBridgeQueue extends AgentBrowserBridgeShutdown
             options
           )
         },
-        resolve: resolve as (value: unknown) => void,
-        reject
-      })
+        resolve: (value) => {
+          removeCancellation()
+          // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: execute returns the T accepted by this queue entry's resolver.
+          resolve(value as T)
+        },
+        reject: (error) => {
+          removeCancellation()
+          reject(error)
+        }
+      }
+      queue.push(command)
+      options.signal?.addEventListener('abort', onAbort, { once: true })
       this.processQueue(sessionName)
     })
   }
@@ -105,6 +128,10 @@ export abstract class AgentBrowserBridgeQueue extends AgentBrowserBridgeShutdown
     const sessionName = `${ORCA_TAB_SESSION_PREFIX}${browserPageId}`
     // Why: the page's guest can change while queued; bind to the one current at execution.
     const target = this.resolveCommandTarget(worktreeId, browserPageId)
+    const guest = this.getWebContents(target.webContentsId)
+    if (guest && !options.allowEvaluationRecovery) {
+      assertBrowserPageEvaluationAvailable(guest)
+    }
     if (options.ensureSession !== false) {
       await this.ensureSession(sessionName, browserPageId, target.webContentsId)
     }
@@ -128,9 +155,11 @@ export abstract class AgentBrowserBridgeQueue extends AgentBrowserBridgeShutdown
       }
     }
 
-    if (queue && queue.length === 0 && this.commandQueues.get(sessionName) === queue) {
-      this.commandQueues.delete(sessionName)
+    if (this.commandQueues.get(sessionName) === queue) {
+      if (queue && queue.length === 0) {
+        this.commandQueues.delete(sessionName)
+      }
+      this.processingQueues.delete(sessionName)
     }
-    this.processingQueues.delete(sessionName)
   }
 }

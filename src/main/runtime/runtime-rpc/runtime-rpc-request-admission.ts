@@ -53,7 +53,10 @@ export class RuntimeRpcRequestAdmission extends RuntimeRpcBinaryRouting {
         context?.startKeepalive()
       }
       return await this.dispatcher.dispatch(request, {
-        signal: longPoll || browserWait ? context?.signal : undefined,
+        signal:
+          longPoll || browserWait || request.method === 'browser.eval'
+            ? context?.signal
+            : undefined,
         callerScope
       })
     } finally {

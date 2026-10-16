@@ -135,7 +135,7 @@ export abstract class AgentBrowserBridgeCoreCommands extends AgentBrowserBridgeQ
         }
         return { url: navigatedWebContents.getURL(), title: navigatedWebContents.getTitle() }
       },
-      { ensureSession: false }
+      { ensureSession: false, allowEvaluationRecovery: true }
     )
   }
 

@@ -5,7 +5,8 @@ import { captureFullPageScreenshot } from './cdp-screenshot'
 import { acquireElectronDebugger } from './electron-debugger-lease'
 import { AgentBrowserBridgeUtilityCommands } from './agent-browser-bridge-utility-commands'
 import { ORCA_TAB_SESSION_PREFIX } from './agent-browser-orphan-sweep'
-import { captureRemoteCliBrowserWorkBound } from '../runtime/desktop-browser-bridge/remote-cli-browser-scope'
+import { createBrowserEvaluationDeadline } from './browser-evaluation-deadline'
+import { runBrowserPageEvaluation } from './browser-page-evaluation'
 
 export abstract class AgentBrowserBridgeCaptureCommands extends AgentBrowserBridgeUtilityCommands {
   async screenshot(
@@ -59,71 +60,77 @@ export abstract class AgentBrowserBridgeCaptureCommands extends AgentBrowserBrid
   async evaluate(
     expression: string,
     worktreeId?: string,
-    browserPageId?: string
+    browserPageId?: string,
+    signal?: AbortSignal
   ): Promise<BrowserEvalResult> {
-    // Why captured here: the queue may run this later, outside the bridged command's context.
-    const bound = captureRemoteCliBrowserWorkBound()
-    return this.enqueueTargetedCommand(
-      worktreeId,
-      browserPageId,
-      async (_sessionName, target) => {
-        const wc = this.requireTargetWebContents(target)
-        let releaseDebugger = (): void => {}
-        try {
-          releaseDebugger = acquireElectronDebugger(wc).release
-          // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: Runtime.evaluate with returnByValue always answers this CDP shape; unchanged from before the bound.
-          const { result, exceptionDetails } = (await bound(
-            wc.debugger.sendCommand('Runtime.evaluate', {
-              expression,
-              returnByValue: true,
-              awaitPromise: true
-            }),
-            () => void wc.debugger.sendCommand('Runtime.terminateExecution').catch(() => {})
-          )) as {
-            result: { value?: unknown; description?: string }
-            exceptionDetails?: { text: string; exception?: { description?: string } }
-          }
-          if (exceptionDetails) {
-            throw new BrowserError(
-              'browser_eval_error',
-              exceptionDetails.exception?.description ?? exceptionDetails.text
-            )
-          }
+    const deadline = createBrowserEvaluationDeadline(signal)
+    try {
+      return await this.enqueueTargetedCommand(
+        worktreeId,
+        browserPageId,
+        async (_sessionName, target) => {
+          const wc = this.requireTargetWebContents(target)
+          let releaseDebugger = (): void => {}
+          try {
+            releaseDebugger = acquireElectronDebugger(wc).release
+            // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: Runtime.evaluate with returnByValue always answers this CDP shape; unchanged from before the bound.
+            const { result, exceptionDetails } = (await runBrowserPageEvaluation(
+              wc,
+              deadline.signal,
+              () =>
+                wc.debugger.sendCommand('Runtime.evaluate', {
+                  expression,
+                  returnByValue: true,
+                  awaitPromise: true
+                })
+            )) as {
+              result: { value?: unknown; description?: string }
+              exceptionDetails?: { text: string; exception?: { description?: string } }
+            }
+            if (exceptionDetails) {
+              throw new BrowserError(
+                'browser_eval_error',
+                exceptionDetails.exception?.description ?? exceptionDetails.text
+              )
+            }
 
-          const currentTarget = this.resolveCommandTarget(worktreeId, target.browserPageId)
-          if (currentTarget.webContentsId !== target.webContentsId) {
+            const currentTarget = this.resolveCommandTarget(worktreeId, target.browserPageId)
+            if (currentTarget.webContentsId !== target.webContentsId) {
+              throw new BrowserError(
+                'browser_tab_changed',
+                `Browser page ${target.browserPageId} changed while evaluating; retry the command`
+              )
+            }
+            return {
+              result:
+                result.value !== undefined
+                  ? typeof result.value === 'object' && result.value !== null
+                    ? JSON.stringify(result.value)
+                    : String(result.value)
+                  : (result.description ?? ''),
+              origin: wc.getURL()
+            }
+          } catch (error) {
+            if (!this.getWebContents(target.webContentsId)) {
+              throw this.createPageUnavailableError(
+                `${ORCA_TAB_SESSION_PREFIX}${target.browserPageId}`
+              )
+            }
+            if (error instanceof BrowserError) {
+              throw error
+            }
             throw new BrowserError(
-              'browser_tab_changed',
-              `Browser page ${target.browserPageId} changed while evaluating; retry the command`
+              'browser_error',
+              `Failed to evaluate in browser page ${target.browserPageId}: ${error instanceof Error ? error.message : String(error)}`
             )
+          } finally {
+            releaseDebugger()
           }
-          return {
-            result:
-              result.value !== undefined
-                ? typeof result.value === 'object' && result.value !== null
-                  ? JSON.stringify(result.value)
-                  : String(result.value)
-                : (result.description ?? ''),
-            origin: wc.getURL()
-          }
-        } catch (error) {
-          if (error instanceof BrowserError) {
-            throw error
-          }
-          if (!this.getWebContents(target.webContentsId)) {
-            throw this.createPageUnavailableError(
-              `${ORCA_TAB_SESSION_PREFIX}${target.browserPageId}`
-            )
-          }
-          throw new BrowserError(
-            'browser_error',
-            `Failed to evaluate in browser page ${target.browserPageId}: ${error instanceof Error ? error.message : String(error)}`
-          )
-        } finally {
-          releaseDebugger()
-        }
-      },
-      { ensureSession: false }
-    )
+        },
+        { ensureSession: false, signal: deadline.signal }
+      )
+    } finally {
+      deadline.dispose()
+    }
   }
 }

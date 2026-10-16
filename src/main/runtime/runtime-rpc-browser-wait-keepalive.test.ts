@@ -9,6 +9,45 @@ import { readRuntimeMetadata } from './runtime-metadata'
 import { createLongPollServer } from './runtime-rpc-long-poll-server.test-fixture'
 import { openFramedSession, waitFor } from './runtime-rpc-test-harness'
 
+it('aborts a browser evaluation when its local CLI connection ends without enabling keepalive', async () => {
+  const userDataPath = mkdtempSync(join(tmpdir(), 'orca-browser-eval-abort-'))
+  const runtime = new OrcaRuntimeService()
+  const server = createLongPollServer({ runtime, userDataPath, keepaliveIntervalMs: 20 })
+  const response = Promise.withResolvers<void>()
+  let signal: AbortSignal | undefined
+  const dispatch = vi
+    .spyOn(server['dispatcher'], 'dispatch')
+    .mockImplementation(async (incoming, options) => {
+      signal = options?.signal
+      await response.promise
+      return { id: incoming.id, ok: true, result: {}, _meta: { runtimeId: runtime.getRuntimeId() } }
+    })
+  try {
+    await server.start()
+    const metadata = readRuntimeMetadata(userDataPath)
+    if (!metadata?.transports[0]) {
+      throw new Error('Missing test runtime transport')
+    }
+    const session = openFramedSession(metadata.transports[0].endpoint, {
+      id: 'browser-eval',
+      authToken: metadata.authToken,
+      method: 'browser.eval',
+      params: { expression: 'pending' }
+    })
+    await waitFor(() => dispatch.mock.calls.length === 1)
+    expect(signal).toBeInstanceOf(AbortSignal)
+    expect(signal?.aborted).toBe(false)
+    expect(session.frames).toEqual([])
+    session.socket.destroy()
+    await session.done
+    await waitFor(() => signal?.aborted === true)
+  } finally {
+    response.resolve()
+    await server.stop()
+    rmSync(userDataPath, { recursive: true, force: true })
+  }
+})
+
 it.each([false, true])(
   'keeps browser waits alive with long-poll capacity occupied=%s',
   async (occupied) => {
