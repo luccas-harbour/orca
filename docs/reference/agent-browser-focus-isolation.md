@@ -10,6 +10,8 @@ issue [#20595](https://github.com/stablyai/orca/issues/20595), with #16674, #129
 Agent input reaches the page it targets and nothing else. It never moves the user's keyboard focus,
 and it never lands in whatever the user is typing into. Only an explicit user-facing focus request
 (`tab switch --focus`) may reveal a page, and even that does not hand it OS focus.
+Agent input must also work while its tab or workspace is inactive, including pages created without
+desktop activation. It must not require the user to select or click the page first.
 
 ## Why `<webview>` makes this hard (measured, Electron 43)
 
@@ -72,7 +74,8 @@ popup and copies every frame. It stays an experiment, not the fix.
    focused element, waiting for its answer. When the input ends the pane gives focus back, and
    checks again 50 ms later in case Chromium's focus move arrived after the end message. Nothing is
    restored when the user already had focus in that page.
-   If the pane does not answer, the input is refused with `browser_focus_guard_unavailable`
+   Main allows up to one second for a busy hosting renderer to acknowledge. If the pane does not
+   answer, the input is refused with `browser_focus_guard_unavailable`
    rather than sent. Agent Tab keys take the same guard, because Tab from the page's last field
    moves focus out of the guest into Orca's window.
 4. **Agent keys are marked as the agent's.** While agent input is injected, the guest's Orca
@@ -84,7 +87,7 @@ Known gaps: the user's element is blurred for the length of one agent press, so 
 window reach the page and an in-progress IME composition is lost. Edit commands (`selectAll`,
 `paste`, ...) run even when the page cancels the key. Focus emulation stays on while the debugger
 is attached, so a page the user really leaves sees no blur, and it covers the main frame only, so
-a menu inside a cross-site frame can still close. A pane that misses the 150 ms ready window
+a menu inside a cross-site frame can still close. A pane that misses the one-second ready window
 refuses that input. Only offscreen rendering removes the first gap.
 
 ## Tracker

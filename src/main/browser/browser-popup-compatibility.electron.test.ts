@@ -1,10 +1,12 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import type { Page } from 'playwright'
 import {
   artifactDir,
   browser,
   closeChildren,
+  enablePopupFixtureBrowserReload,
   expectedSecurity,
   guest,
   origin,
@@ -12,6 +14,93 @@ import {
   snapshots,
   status
 } from './browser-popup-compatibility-cdp-fixture'
+
+enablePopupFixtureBrowserReload()
+
+async function reloadProbePage(page: Page, name: string, pageInitiated = false): Promise<void> {
+  const completed = status().browserReloads[name]?.completed ?? 0
+  const loaded = page.waitForEvent('domcontentloaded')
+  if (pageInitiated) {
+    await Promise.all([loaded, page.evaluate(() => setTimeout(() => location.reload(), 0))])
+    return
+  }
+  await Promise.all([
+    loaded,
+    page.evaluate(() => console.log('orca-popup-fixture:reload')),
+    expect
+      .poll(() => {
+        const receipt = status().browserReloads[name]
+        if (receipt?.error) {
+          throw new Error(receipt.error)
+        }
+        return receipt?.completed ?? 0
+      })
+      .toBe(completed + 1)
+  ])
+}
+
+describe('hidden guest reload input control', () => {
+  it.each(['local', 'route'] as const)(
+    'delivers trusted pointer events after native and page-initiated reloads: %s',
+    async (name) => {
+      const page = guest(name)
+      let checkedAllReloads = false
+      try {
+        for (let generation = 0; generation < 10; generation += 1) {
+          await reloadProbePage(page, name, generation % 2 === 1)
+          const cdp = await page.context().newCDPSession(page)
+          try {
+            await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true })
+            await page.evaluate(() => {
+              const target = document.createElement('button')
+              target.id = 'reload-input-target'
+              target.style.cssText = 'position:fixed;left:10px;top:10px;width:120px;height:60px'
+              target.textContent = 'waiting'
+              target.addEventListener('pointerdown', (event) => {
+                target.textContent = `down:${event.isTrusted}`
+              })
+              target.addEventListener('pointerup', (event) => {
+                target.textContent += `,up:${event.isTrusted}`
+              })
+              document.body.replaceChildren(target)
+            })
+            for (const [type, button, buttons] of [
+              ['mouseMoved', 'none', 0],
+              ['mousePressed', 'left', 1],
+              ['mouseReleased', 'left', 0]
+            ] as const) {
+              await cdp.send('Input.dispatchMouseEvent', {
+                type,
+                button,
+                buttons,
+                x: 30,
+                y: 30,
+                clickCount: 1
+              })
+            }
+            // CDP acknowledgement alone did not establish delivery in the affected sessions.
+            await expect
+              .poll(() => page.locator('#reload-input-target').textContent(), {
+                message: `${name} guest lost trusted pointer input after reload ${generation + 1}`
+              })
+              .toBe('down:true,up:true')
+            expect(status().windowsHidden).toBe(true)
+          } finally {
+            await cdp.detach().catch(() => {})
+          }
+        }
+        checkedAllReloads = true
+      } finally {
+        if (!page.isClosed()) {
+          const restoring = reloadProbePage(page, name)
+          // Preserve the original input failure if restoring this guest also fails.
+          await (checkedAllReloads ? restoring : restoring.catch(() => {}))
+        }
+      }
+    },
+    60_000
+  )
+})
 
 describe('hidden Chromium popup compatibility', () => {
   it.each(['local', 'route'])(

@@ -64,7 +64,7 @@ describe('guardPaneFocusForAgentInput', () => {
     expect(ipcListeners.get(AGENT_INPUT_FOCUS_GUARD_READY_CHANNEL)).toEqual([])
   })
 
-  it('refuses the input and ends the guard when the pane never answers', async () => {
+  it('refuses input within one second and ends the guard when the pane never answers', async () => {
     vi.useFakeTimers()
     const { sent, renderer } = fakeRenderer(7, false)
 
@@ -72,7 +72,7 @@ describe('guardPaneFocusForAgentInput', () => {
     const outcome = expect(guarded).rejects.toMatchObject({
       code: 'browser_focus_guard_unavailable'
     })
-    await vi.advanceTimersByTimeAsync(150)
+    await vi.advanceTimersByTimeAsync(1_000)
 
     await outcome
     expect(sent.map(({ data }) => data.active)).toEqual([true, false])
@@ -98,8 +98,29 @@ describe('guardPaneFocusForAgentInput', () => {
     await Promise.resolve()
 
     expect(settled).toBe('pending')
-    await vi.advanceTimersByTimeAsync(150)
+    await vi.runAllTimersAsync()
     expect(settled).toBe('refused')
+  })
+
+  it('accepts a healthy background pane after a short renderer stall', async () => {
+    vi.useFakeTimers()
+    const { renderer, sent } = fakeRenderer(7, false)
+    const guarded = guardPaneFocusForAgentInput(renderer, 'background-page').then(
+      (release) => ({ release, error: null }),
+      (error: unknown) => ({ release: undefined, error })
+    )
+
+    // Model a busy host renderer; the guest itself remains responsive.
+    await vi.advanceTimersByTimeAsync(400)
+    for (const listener of ipcListeners.get(AGENT_INPUT_FOCUS_GUARD_READY_CHANNEL) ?? []) {
+      listener({ sender: { id: 7 } }, { token: sent[0].data.token })
+    }
+    const result = await guarded
+    result.release?.()
+
+    expect(result).toEqual({ release: expect.any(Function), error: null })
+    expect(sent.map(({ data }) => data.active)).toEqual([true, false])
+    expect(ipcListeners.get(AGENT_INPUT_FOCUS_GUARD_READY_CHANNEL)).toEqual([])
   })
 })
 

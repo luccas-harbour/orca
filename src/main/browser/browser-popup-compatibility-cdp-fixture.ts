@@ -10,8 +10,11 @@ import { afterAll, afterEach, beforeAll, beforeEach, expect, vi } from 'vitest'
 import { build as buildVite } from 'vite'
 import { waitForBrowserCdpEndpoint } from './browser-session-ua-cdp-collector'
 import { popupFixtureHtml } from './browser-popup-compatibility-page-fixture'
+import type { PopupFixtureStatus } from './browser-popup-fixture-status'
 import { resolveElectronProbeLaunch } from './electron-probe-display-launch'
 import { startHiddenRendererFrameCapture } from './hidden-renderer-frame-capture-fixture'
+
+export { expectedSecurity } from './browser-popup-fixture-status'
 
 // Hidden renderer startup and CDP events can exceed the default one-second poll on CI.
 vi.setConfig({ expect: { poll: { timeout: 10_000 } } })
@@ -41,42 +44,8 @@ const stopFrameCaptures = new Map<Page, () => Promise<void>>()
 const statusPath = join(root, 'status.json')
 export const artifactDir = process.env.ORCA_POPUP_FIXTURE_ARTIFACT_DIR
 export const snapshots: ReturnType<typeof status>[] = []
-export const expectedSecurity = { sandbox: true, contextIsolation: true, nodeIntegration: false }
 
-export function status(): {
-  revision: number
-  ready?: boolean
-  error?: string
-  windowsHidden: boolean
-  tabOpens: { url: string; activate: boolean }[]
-  blocked: number[]
-  inputs: string[]
-  childRequests: {
-    adopted: boolean
-    native: boolean
-    sessionMatches: boolean
-    security: typeof expectedSecurity
-    permission?: string
-  }[]
-  routeGranted: boolean
-  routeContents: { security: typeof expectedSecurity; webRtcPolicy: string }[]
-  native: {
-    presentationCalls: string[]
-    requests: { disposition: string; features: string; frameName: string; post: boolean }[]
-    creation: {
-      firstNavigationPolicy: string
-      firstNavigationOwner: number | null
-      firstNavigationTitle: string
-    }[]
-    windows: {
-      closed: boolean
-      title: string
-      fullscreen: boolean
-      focused: boolean
-      contentSize: number[]
-    }[]
-  }
-} {
+export function status(): PopupFixtureStatus {
   return JSON.parse(readFileSync(statusPath, 'utf8'))
 }
 
@@ -194,7 +163,8 @@ beforeAll(async () => {
       ORCA_BACKGROUND_LAUNCH: '1',
       ORCA_POPUP_FIXTURE_ORIGIN: origin,
       ORCA_POPUP_FIXTURE_STATUS: statusPath,
-      ORCA_POPUP_FIXTURE_NATIVE_CONTROLS: nativeControls ? '1' : '0'
+      ORCA_POPUP_FIXTURE_NATIVE_CONTROLS: nativeControls ? '1' : '0',
+      ORCA_POPUP_FIXTURE_BROWSER_RELOAD: browserReloadEnabled ? '1' : '0'
     },
     stdio: ['ignore', 'pipe', 'pipe']
   })
@@ -306,6 +276,10 @@ export async function closeChildren(page: Page): Promise<void> {
 
 let evidenceName = 'electron-evidence.json'
 let nativeControls = false
+let browserReloadEnabled = false
+export function enablePopupFixtureBrowserReload(): void {
+  browserReloadEnabled = true
+}
 export function enablePopupFixtureNativeControls(): void {
   nativeControls = true
 }

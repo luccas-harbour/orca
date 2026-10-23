@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect } from 'react'
 import { shallow } from 'zustand/shallow'
 import { useAppStore } from '../store'
 import { getWorktreeIdsWithUnfinishedAgent } from '../lib/worktree-activity-state'
@@ -26,8 +26,35 @@ type BrowserRetentionController = Pick<
   | 'workspaceSurfaceIdSet'
 >
 
+// Remember observed ownership across controller remounts without claiming later manual pages.
+const agentBrowserTabIdsByWorktree = new Map<string, ReadonlySet<string>>()
+
+function updateAgentBrowserRetention(state: ReturnType<typeof useAppStore.getState>): boolean {
+  const unfinished = getWorktreeIdsWithUnfinishedAgent(
+    state.agentStatusByPaneKey,
+    state.tabsByWorktree
+  )
+  const next = new Map<string, ReadonlySet<string>>()
+  for (const id of new Set([...unfinished, ...agentBrowserTabIdsByWorktree.keys()])) {
+    const previous = agentBrowserTabIdsByWorktree.get(id)
+    const tabIds = new Set(
+      (state.browserTabsByWorktree[id] ?? [])
+        .filter((tab) => unfinished.has(id) || previous?.has(tab.id))
+        .map((tab) => tab.id)
+    )
+    if (unfinished.has(id) || tabIds.size > 0) {
+      next.set(id, tabIds)
+    }
+  }
+  const changed = !shallow(new Set(agentBrowserTabIdsByWorktree.keys()), new Set(next.keys()))
+  agentBrowserTabIdsByWorktree.clear()
+  for (const [id, tabIds] of next) {
+    agentBrowserTabIdsByWorktree.set(id, tabIds)
+  }
+  return changed
+}
+
 export function useTerminalBrowserRetention(controller: BrowserRetentionController): void {
-  const agentWorktreeIdsRef = useRef<ReadonlySet<string>>(new Set())
   const {
     browserGuestRetentionBudgetEnabled,
     browserGuestRetentionRevision,
@@ -45,11 +72,7 @@ export function useTerminalBrowserRetention(controller: BrowserRetentionControll
     }
     const removeDownloadTracking = installBrowserPageDownloadActivityTracking(invalidateRetention)
     const removePaintRetentionTracking = onBrowserGuestPaintRetentionChange(invalidateRetention)
-    const state = useAppStore.getState()
-    agentWorktreeIdsRef.current = getWorktreeIdsWithUnfinishedAgent(
-      state.agentStatusByPaneKey,
-      state.tabsByWorktree
-    )
+    updateAgentBrowserRetention(useAppStore.getState())
     const removeAgentTracking = useAppStore.subscribe((state, previous) => {
       if (
         state.agentStatusByPaneKey === previous.agentStatusByPaneKey &&
@@ -58,18 +81,7 @@ export function useTerminalBrowserRetention(controller: BrowserRetentionControll
       ) {
         return
       }
-      const next = getWorktreeIdsWithUnfinishedAgent(
-        state.agentStatusByPaneKey,
-        state.tabsByWorktree
-      )
-      // Turn completion or lost contact must not discard a page awaiting review or a follow-up.
-      for (const id of agentWorktreeIdsRef.current) {
-        if ((state.browserTabsByWorktree[id]?.length ?? 0) > 0) {
-          next.add(id)
-        }
-      }
-      if (!shallow(agentWorktreeIdsRef.current, next)) {
-        agentWorktreeIdsRef.current = next
+      if (updateAgentBrowserRetention(state)) {
         invalidateRetention()
       }
     })
@@ -111,9 +123,9 @@ export function useTerminalBrowserRetention(controller: BrowserRetentionControll
           state.browserPagesByWorkspace,
           hasLiveBrowserGuest
         ),
-      // Unfinished work owns browser state between commands, after its bootstrap paint lease expires.
+      // Agent-owned pages survive completed turns and bootstrap paint lease expiry.
       isEvictable: (worktreeId) =>
-        !agentWorktreeIdsRef.current.has(worktreeId) &&
+        !agentBrowserTabIdsByWorktree.has(worktreeId) &&
         !browserTabsVetoGuestEviction(state.browserTabsByWorktree[worktreeId] ?? [])
     })
     for (const worktreeId of evictedWorktreeIds) {

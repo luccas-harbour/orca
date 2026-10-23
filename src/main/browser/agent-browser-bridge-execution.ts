@@ -33,6 +33,13 @@ export abstract class AgentBrowserBridgeExecution extends AgentBrowserBridgeTabs
   ): Promise<string>
 
   protected requireTargetWebContents(target: ResolvedBrowserCommandTarget): WebContents {
+    const current = this.resolveCommandTarget(undefined, target.browserPageId)
+    if (current.webContentsId !== target.webContentsId) {
+      throw new BrowserError(
+        'browser_tab_changed',
+        `Browser page ${target.browserPageId} changed while the command was running; retry the command`
+      )
+    }
     const wc = this.getWebContents(target.webContentsId)
     if (!wc || wc.isDestroyed()) {
       throw this.createPageUnavailableError(`${ORCA_TAB_SESSION_PREFIX}${target.browserPageId}`)

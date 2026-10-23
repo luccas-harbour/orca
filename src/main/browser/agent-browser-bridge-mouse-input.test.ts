@@ -126,6 +126,125 @@ describe('AgentBrowserBridge', () => {
     ).toBe(false)
   })
 
+  it.each(['mouseDown', 'mouseClick'] as const)(
+    'refuses %s when its page changes guests while the focus guard is pending',
+    async (command) => {
+      const tabs = new Map([['tab-1', 100]])
+      const original = mockWebContents(100)
+      const replacement = mockWebContents(200)
+      original.getType.mockReturnValue('webview')
+      replacement.getType.mockReturnValue('webview')
+      original.debugger.sendCommand.mockResolvedValue({})
+      replacement.debugger.sendCommand.mockResolvedValue({})
+      webContentsFromIdMock.mockImplementation((id: number) =>
+        id === 100 ? original : id === 200 ? replacement : null
+      )
+      const ready = Promise.withResolvers<() => void>()
+      const release = vi.fn()
+      const guardUserFocusForAgentInput = vi.fn(() => ready.promise)
+      bridge = new AgentBrowserBridge(
+        mockBrowserManager(tabs, undefined, { guardUserFocusForAgentInput })
+      )
+      await bridge.mouseMove(30, 40, undefined, 'tab-1')
+      original.debugger.sendCommand.mockClear()
+
+      const input =
+        command === 'mouseDown'
+          ? bridge.mouseDown('left', undefined, 'tab-1')
+          : bridge.mouseClick(30, 40, 'left', undefined, 'tab-1')
+      const outcome = input.then(
+        (value) => ({ ok: true, value }),
+        (error: unknown) => ({ ok: false, error })
+      )
+      await vi.waitFor(() => expect(guardUserFocusForAgentInput).toHaveBeenCalledWith(100))
+
+      // The retired guest can remain alive while its page is already owned by a replacement.
+      tabs.set('tab-1', 200)
+      await bridge.onProcessSwap('tab-1', 200, 100)
+      ready.resolve(release)
+      const result = await outcome
+
+      expect(release).toHaveBeenCalledTimes(1)
+      expect.soft(result).toMatchObject({
+        ok: false,
+        error: { code: 'browser_tab_changed' }
+      })
+      expect(
+        original.debugger.sendCommand.mock.calls.filter(
+          ([method]) => method === 'Input.dispatchMouseEvent'
+        )
+      ).toEqual([])
+      expect(replacement.debugger.sendCommand).not.toHaveBeenCalled()
+      if (command === 'mouseDown') {
+        tabs.set('tab-1', 100)
+        await bridge.onProcessSwap('tab-1', 100, 200)
+        await bridge.mouseMove(35, 45, undefined, 'tab-1')
+        expect(original.debugger.sendCommand).toHaveBeenLastCalledWith(
+          'Input.dispatchMouseEvent',
+          expect.objectContaining({ button: 'none', buttons: 0 })
+        )
+      }
+    }
+  )
+
+  it.each(['mouseDown', 'mouseClick'] as const)(
+    'does not acknowledge %s after its guest changes during dispatch',
+    async (command) => {
+      const tabs = new Map([['tab-1', 100]])
+      const original = mockWebContents(100)
+      const replacement = mockWebContents(200)
+      original.getType.mockReturnValue('webview')
+      const release = vi.fn()
+      const guardUserFocusForAgentInput = vi.fn(async () => release)
+      webContentsFromIdMock.mockImplementation((id: number) =>
+        id === 100 ? original : id === 200 ? replacement : null
+      )
+      bridge = new AgentBrowserBridge(
+        mockBrowserManager(tabs, undefined, { guardUserFocusForAgentInput })
+      )
+      const dispatched = Promise.withResolvers<void>()
+      const acknowledgement = Promise.withResolvers<unknown>()
+      original.debugger.sendCommand.mockImplementation(async (method) => {
+        if (method === 'Input.dispatchMouseEvent') {
+          dispatched.resolve()
+          return acknowledgement.promise
+        }
+        return {}
+      })
+      const input =
+        command === 'mouseDown'
+          ? bridge.mouseDown('left', undefined, 'tab-1')
+          : bridge.mouseClick(30, 40, 'left', undefined, 'tab-1')
+      const outcome = input.then(
+        (value) => ({ ok: true, value }),
+        (error: unknown) => ({ ok: false, error })
+      )
+      await dispatched.promise
+      tabs.set('tab-1', 200)
+      await bridge.onProcessSwap('tab-1', 200, 100)
+      acknowledgement.resolve({})
+
+      expect(await outcome).toMatchObject({ ok: false, error: { code: 'browser_tab_changed' } })
+      expect(release).toHaveBeenCalledTimes(1)
+      expect(replacement.debugger.sendCommand).not.toHaveBeenCalled()
+      if (command === 'mouseClick') {
+        expect(original.debugger.sendCommand).toHaveBeenLastCalledWith(
+          'Input.dispatchMouseEvent',
+          expect.objectContaining({ type: 'mouseReleased', buttons: 0 })
+        )
+      } else {
+        tabs.set('tab-1', 100)
+        await bridge.onProcessSwap('tab-1', 100, 200)
+        await bridge.mouseMove(35, 45, undefined, 'tab-1')
+        expect(original.debugger.sendCommand).toHaveBeenLastCalledWith(
+          'Input.dispatchMouseEvent',
+          expect.objectContaining({ button: 'left', buttons: 1 })
+        )
+        await bridge.mouseUp('left', undefined, 'tab-1')
+      }
+    }
+  )
+
   it('falls back to CDP mouse events when runtime does not handle a mobile tap', async () => {
     const wc = mockWebContents(100)
     wc.debugger.sendCommand.mockImplementation(async (method: string) => {

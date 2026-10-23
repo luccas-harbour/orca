@@ -10,6 +10,7 @@ import {
 import { renameSync, writeFileSync } from 'node:fs'
 import { applyBackgroundActivationPolicy } from '../window/foreground-activation-policy'
 import { BrowserManager } from './browser-manager'
+import { createPopupFixtureReloadController } from './browser-popup-reload-electron-fixture'
 import { BrowserRouteWebContentsRegistry } from './browser-route-webcontents-registry'
 import { initializeBrowserProcessUserAgent } from './browser-process-user-agent'
 import type { PopupChildWindowOptions } from './popup-origin-bar-window'
@@ -80,6 +81,7 @@ class FixtureBrowserManager extends BrowserManager {
 }
 
 const manager = new FixtureBrowserManager()
+const reloadController = createPopupFixtureReloadController(manager, writeStatus)
 const guests = new Map<string, WebContents>()
 const hosts: BrowserWindow[] = []
 const blocked: number[] = []
@@ -129,6 +131,7 @@ function writeStatus(error?: string): void {
         })),
       blocked,
       inputs,
+      browserReloads: reloadController.receipts,
       windowsHidden: BaseWindow.getAllWindows().every((window) => !window.isVisible()),
       guestIds: Object.fromEntries([...guests].map(([name, guest]) => [name, guest.id]))
     })
@@ -170,6 +173,7 @@ async function createHost(name: string, partition: string, nativeControl = false
           return
         }
         manager.attachGuestPolicies(guest)
+        reloadController.attach(guest, name)
         if (
           !manager.registerGuest({
             browserPageId: name,
@@ -232,14 +236,12 @@ async function createHost(name: string, partition: string, nativeControl = false
   writeStatus()
 }
 
-process.on('uncaughtException', (error) => {
-  writeStatus(String(error))
-  app.exit(1)
-})
-process.on('unhandledRejection', (error) => {
-  writeStatus(String(error))
-  app.exit(1)
-})
+for (const event of ['uncaughtException', 'unhandledRejection'] as const) {
+  process.on(event, (error: unknown) => {
+    writeStatus(String(error))
+    app.exit(1)
+  })
+}
 
 async function run(): Promise<void> {
   writeStatus()

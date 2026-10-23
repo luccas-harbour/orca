@@ -52,10 +52,9 @@ export abstract class AgentBrowserBridgePointerCommands extends AgentBrowserBrid
       )
     }
     const state = cdpPointerStateFor(wc)
-    // Why: build() mutates the tracked state before the event is on the wire; a rejected
-    // dispatch changed nothing in the page, so the pre-dispatch state is what is real —
-    // keeping the mutation would leave a phantom held button on every later event.
+    // A failed dispatch must not leave a phantom held button in the tracked state.
     const preDispatch = { ...state }
+    let dispatched = false
     let releaseDebugger = (): void => {}
     let releaseFocusGuard = (): void => {}
     try {
@@ -64,10 +63,15 @@ export abstract class AgentBrowserBridgePointerCommands extends AgentBrowserBrid
       if (press) {
         releaseFocusGuard = await this.focusPageForPress(wc, target.webContentsId)
       }
+      this.requireTargetWebContents(target)
       await wc.debugger.sendCommand('Input.dispatchMouseEvent', params)
+      dispatched = true
+      this.requireTargetWebContents(target)
       return result
     } catch (error) {
-      Object.assign(state, preDispatch)
+      if (!dispatched) {
+        Object.assign(state, preDispatch)
+      }
       // Why: attach/dispatch reject with plain Errors, which the RPC layer would report as
       // runtime_error — the helper path this replaced always produced a browser_* code, and
       // the pane only reclaims a dead page when it sees one.

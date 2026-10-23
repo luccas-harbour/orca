@@ -110,6 +110,7 @@ describe('browser guest retention during agent work', () => {
   })
 
   afterEach(() => {
+    act(() => useAppStore.setState({ agentStatusByPaneKey: {}, browserTabsByWorktree: {} }))
     cleanup()
     for (const token of leaseTokens.splice(0)) {
       releaseBrowserAutomationVisibility(token)
@@ -171,6 +172,25 @@ describe('browser guest retention during agent work', () => {
     expect(mocks.destroyGuests).not.toHaveBeenCalled()
   })
 
+  it.each(['working', 'done'] as const)(
+    'preserves an open %s agent page after its retention controller remounts',
+    (state) => {
+      useAppStore.setState({ agentStatusByPaneKey: { owner: agent('wt-9') } })
+      mountRetention()
+      act(() => {
+        useAppStore.setState({ agentStatusByPaneKey: { owner: agent('wt-9', state) } })
+      })
+      expectRetained('wt-9')
+
+      cleanup()
+      mocks.destroyGuests.mockClear()
+      mountRetention()
+
+      expectRetained('wt-9')
+      expect(mocks.destroyGuests.mock.calls.map((call) => call[2])).toContain('wt-8')
+    }
+  )
+
   it('preserves browser state through remote owner loss and a subsequent completed turn', () => {
     useAppStore.setState({
       agentStatusByPaneKey: { owner: { ...agent('wt-9'), connectionId: 'ssh-connection' } }
@@ -185,6 +205,123 @@ describe('browser guest retention during agent work', () => {
       useAppStore.setState({ agentStatusByPaneKey: { owner: agent('wt-9', 'done') } })
     })
     expectRetained('wt-9')
+  })
+
+  it.each(['structured', 'remote'] as const)(
+    'preserves a completed %s agent page after its retention controller remounts',
+    (kind) => {
+      const owner: AgentStatusEntry = {
+        ...agent('wt-9'),
+        ...(kind === 'remote' ? { connectionId: 'ssh-connection' } : { structuredHostOwned: true })
+      }
+      useAppStore.setState({
+        agentStatusByPaneKey: { owner }
+      })
+      mountRetention()
+      act(() => {
+        useAppStore.setState({ agentStatusByPaneKey: { owner: { ...owner, state: 'done' } } })
+      })
+      cleanup()
+      mocks.destroyGuests.mockClear()
+
+      mountRetention()
+
+      expectRetained('wt-9')
+      expect(mocks.destroyGuests.mock.calls.map((call) => call[2])).toContain('wt-8')
+    }
+  )
+
+  it('does not retain newly opened pages for an already completed agent', () => {
+    const browserTabsByWorktree = useAppStore.getState().browserTabsByWorktree
+    useAppStore.setState({
+      agentStatusByPaneKey: { owner: agent('wt-9', 'done') },
+      browserTabsByWorktree: { ...browserTabsByWorktree, 'wt-9': [] }
+    })
+    mountRetention()
+    mocks.destroyGuests.mockClear()
+
+    act(() => {
+      useAppStore.setState({ browserTabsByWorktree })
+      const token = acquireBrowserAutomationVisibility('wt-1')
+      releaseBrowserAutomationVisibility(token)
+    })
+
+    expect(mocks.destroyGuests.mock.calls.map((call) => call[2])).toContain('wt-9')
+  })
+
+  it('keeps manual pages evictable after its retention controller remounts', () => {
+    const browserTabsByWorktree = useAppStore.getState().browserTabsByWorktree
+    useAppStore.setState({
+      agentStatusByPaneKey: { owner: agent('wt-9', 'done') },
+      browserTabsByWorktree: { ...browserTabsByWorktree, 'wt-9': [] }
+    })
+    mountRetention()
+    act(() => useAppStore.setState({ browserTabsByWorktree }))
+    cleanup()
+    mocks.destroyGuests.mockClear()
+
+    mountRetention()
+
+    expect(mocks.destroyGuests.mock.calls.map((call) => call[2])).toContain('wt-9')
+  })
+
+  it('releases completed ownership when only a later manual tab remains', () => {
+    useAppStore.setState({ agentStatusByPaneKey: { owner: agent('wt-9') } })
+    mountRetention()
+    const browserTabsByWorktree = useAppStore.getState().browserTabsByWorktree
+    const originalTabs = browserTabsByWorktree['wt-9']
+    const manualTabs = originalTabs.map((tab) => ({ ...tab, id: 'later-manual-tab' }))
+    act(() => useAppStore.setState({ agentStatusByPaneKey: { owner: agent('wt-9', 'done') } }))
+    act(() => {
+      useAppStore.setState({
+        browserTabsByWorktree: {
+          ...browserTabsByWorktree,
+          'wt-9': [...originalTabs, ...manualTabs]
+        }
+      })
+    })
+    expectRetained('wt-9')
+    mocks.destroyGuests.mockClear()
+
+    act(() => {
+      useAppStore.setState({
+        browserTabsByWorktree: { ...browserTabsByWorktree, 'wt-9': manualTabs }
+      })
+    })
+
+    expect(mocks.destroyGuests.mock.calls.map((call) => call[2])).toContain('wt-9')
+  })
+
+  it('preserves a disconnected owner page after its retention controller remounts', () => {
+    useAppStore.setState({ agentStatusByPaneKey: { owner: agent('wt-9') } })
+    mountRetention()
+    act(() => useAppStore.setState({ agentStatusByPaneKey: {} }))
+    cleanup()
+    mocks.destroyGuests.mockClear()
+
+    mountRetention()
+
+    expectRetained('wt-9')
+  })
+
+  it('releases ownership when the last browser tab is replaced while unmounted', () => {
+    useAppStore.setState({ agentStatusByPaneKey: { owner: agent('wt-9') } })
+    mountRetention()
+    act(() => useAppStore.setState({ agentStatusByPaneKey: { owner: agent('wt-9', 'done') } }))
+    cleanup()
+    const browserTabsByWorktree = useAppStore.getState().browserTabsByWorktree
+    useAppStore.setState({ browserTabsByWorktree: { ...browserTabsByWorktree, 'wt-9': [] } })
+    useAppStore.setState({
+      browserTabsByWorktree: {
+        ...browserTabsByWorktree,
+        'wt-9': browserTabsByWorktree['wt-9'].map((tab) => ({ ...tab, id: 'manual-tab' }))
+      }
+    })
+    mocks.destroyGuests.mockClear()
+
+    mountRetention()
+
+    expect(mocks.destroyGuests.mock.calls.map((call) => call[2])).toContain('wt-9')
   })
 
   it('releases a disappeared owner when its last browser workspace closes', () => {

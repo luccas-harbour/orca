@@ -13,14 +13,13 @@ export type AgentInputFocusGuard = () => Promise<() => void>
 export const AGENT_INPUT_FOCUS_GUARD_CHANNEL = 'browser:agentInputFocusGuard'
 export const AGENT_INPUT_FOCUS_GUARD_READY_CHANNEL = 'browser:agentInputFocusGuardReady'
 
-// Why: the guard and Chromium's focus move reach the pane on separate pipes, so the input waits
-// for the pane to note the user's element first. Without an answer the input is refused.
-const PANE_READY_TIMEOUT_MS = 150
+// Short host stalls must not require revealing the agent's page to send guarded input.
+const PANE_READY_TIMEOUT_MS = 1_000
 
 export function focusGuardUnavailableError(): BrowserError {
   return new BrowserError(
     'browser_focus_guard_unavailable',
-    "Orca could not protect the user's keyboard focus for this page, so the input was not sent. Retry, or show the page first."
+    "Orca could not protect the user's keyboard focus for this page, so the input was not sent. Retry when its hosting pane is responsive."
   )
 }
 
